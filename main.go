@@ -8,131 +8,177 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+  "github.com/VVatchful/pokedex/pokecache"
 )
 
-type Config struct {
-  nextURl     string
-  previousURL string
-}
-
-type LocationArea struct {
-  Name string `json:"name"`
-}
-
 type LocationAreaResponse struct {
-  Results []LocationArea  `json:"results"`
-  Next     *string        `json:"next"`
-  Previous *string        `json:"previous"`
+	Results []struct {
+		Name string `json:"name"`
+	} `json:"results"`
+	Next    *string `json:"next"`
+	Previous *string `json:"previous"`
 }
+
+type PokemonAreaResponse struct {
+	PokemonEncounters []struct {
+		Pokemon struct {
+			Name string `json:"name"`
+		} `json:"pokemon"`
+	} `json:"pokemon_encounters"`
+}
+
+var cache = pokecache.NewCache(5 * time.Minute)
+var nextURL *string
+var prevURL *string
 
 func main() {
-	fmt.Println("You found someones pokedex!")
-
-  config := &Config{}
-
-  commands := map[string]func(*Config){
-    "help":  func(config *Config) { printHelp() },
-		"exit":  func(config *Config) { exitREPL() },
-		"map":   mapCommand,
-		"mapb":  mapBackCommand,
-  }
-	scanner := bufio.NewScanner(os.Stdin)
+	reader := bufio.NewReader(os.Stdin)
 
 	for {
 		fmt.Print("pokedex > ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
 
-		scanner.Scan()
-		input := strings.TrimSpace(scanner.Text())
+		parts := strings.SplitN(input, " ", 2)
+		command := parts[0]
+		var argument string
+		if len(parts) > 1 {
+			argument = parts[1]
+		}
 
-		if cmd, found := commands[input]; found {
-			cmd(config)
-		} else {
-			fmt.Println("Unknown command. Type 'help' to see a list available commands.")
+		switch command {
+		case "help":
+			printHelp()
+		case "exit":
+			fmt.Println("Exiting...")
+			return
+		case "map":
+			handleMap(false)
+		case "mapb":
+			handleMap(true)
+		case "explore":
+			if argument == "" {
+				fmt.Println("Usage: explore <location_area>")
+			} else {
+				handleExplore(argument)
+			}
+		default:
+			fmt.Println("Unknown command. Type 'help' for the list of available commands.")
 		}
 	}
 }
 
 func printHelp() {
 	fmt.Println("Available commands:")
-	fmt.Println("  help  - Prints this help message.")
-	fmt.Println("  exit  - Exits the pokedex.")
-	fmt.Println("  map   - Displays the next 20 location areas.")
-	fmt.Println("  mapb  - Displays the previous 20 location areas.")
+	fmt.Println("help    - Show this help message")
+	fmt.Println("exit    - Exit the program")
+	fmt.Println("map     - Show 20 location areas")
+	fmt.Println("mapb    - Go back 20 location areas")
+	fmt.Println("explore - Explore a specific location area (usage: explore <area_name>)")
 }
 
-func exitREPL() {
-	fmt.Println("Goodbye!")
-	os.Exit(0)
+func handleMap(isBack bool) {
+	var url string
+	if isBack {
+		if prevURL == nil {
+			fmt.Println("No previous location areas available.")
+			return
+		}
+		url = *prevURL
+	} else {
+		if nextURL == nil {
+			url = "https://pokeapi.co/api/v2/location-area/"
+		} else {
+			url = *nextURL
+		}
+	}
+
+	if data, found := cache.Get(url); found {
+		fmt.Println("Cached data found:")
+		parseAndDisplayLocations(data)
+		return
+	}
+
+	data, err := fetchData(url)
+	if err != nil {
+		fmt.Println("Error fetching location areas:", err)
+		return
+	}
+
+	cache.Add(url, data)
+
+	parseAndDisplayLocations(data)
 }
 
-func fetchLocationAreas(url string) (*LocationAreaResponse, error) {
-  resp, err := http.Get(url)
-  if err != nil {
-    return nil, fmt.Errorf("Failed to fetch data: %w", err)
+func handleExplore(areaName string) {
+	// Check if the location area data is cached
+	if data, found := cache.Get(areaName); found {
+		fmt.Println("Cached data found:")
+		parseAndDisplayPokemon(data)
+		return
+	}
 
-  }
-  defer resp.Body.Close()
+	url := fmt.Sprintf("https://pokeapi.co/api/v2/location-area/%s/", areaName)
+  fmt.Println("Fetching from URL:", url)
+	data, err := fetchData(url)
+	if err != nil {
+		fmt.Println("Error fetching location area data:", err)
+		return
+	}
 
-  body, err := io.ReadAll(resp.Body)
-  if err != nil {
-    return nil, fmt.Errorf("Failed to read response body: %w", err)
-  }
+	cache.Add(areaName, data)
 
-  var locationAreas LocationAreaResponse
-  err = json.Unmarshal(body, &locationAreas)
-  if err != nil {
-    return nil, fmt.Errorf("Failed to parse JSON: %w", err)
-  }
-
-  return &locationAreas, nil
+	parseAndDisplayPokemon(data)
 }
 
-func mapCommand(config *Config) {
-  url := config.nextURl
-  if url == "" {
-    url = "https://pokeapi.co/api/v2/location-area/"
-  }
+func fetchData(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-  locationAreas, err := fetchLocationAreas(url)
-  if err != nil {
-    fmt.Println("Error:",err)
-    return
-  }
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch data: %s", resp.Status)
+	}
 
-  for _, area := range locationAreas.Results {
-    fmt.Println(area.Name)
-  }
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 
-  if locationAreas.Next != nil {
-    config.nextURl = *locationAreas.Next
-  }
-  if locationAreas.Previous != nil {
-    config.previousURL = *locationAreas.Previous
-  }
+	return body, nil
 }
 
-func mapBackCommand(config *Config) {
-    if config.previousURL == "" {
-      fmt.Println("You are already on the first page, cannot go back any further.")
-      return
-    }
+func parseAndDisplayLocations(data []byte) {
+	var locationAreas LocationAreaResponse
+	err := json.Unmarshal(data, &locationAreas)
+	if err != nil {
+		fmt.Println("Error parsing JSON:", err)
+		return
+	}
 
-    locationAreas, err := fetchLocationAreas(config.previousURL)
-    if err != nil {
-      fmt.Println("Error", err)
-      return
-    }
+	fmt.Println("Location areas:")
+	for _, location := range locationAreas.Results {
+		fmt.Println(location.Name)
+	}
 
-    for _, area := range locationAreas.Results {
-      fmt.Println(area.Name)
-    }
-
-    if locationAreas.Next != nil {
-      config.nextURl = *locationAreas.Next
-    }
-    if locationAreas.Previous != nil {
-      config.previousURL = *locationAreas.Previous
-    }
+	nextURL = locationAreas.Next
+	prevURL = locationAreas.Previous
 }
 
+func parseAndDisplayPokemon(data []byte) {
+	var pokemonArea PokemonAreaResponse
+	err := json.Unmarshal(data, &pokemonArea)
+	if err != nil {
+		fmt.Println("Error parsing JSON:", err)
+		return
+	}
+
+	fmt.Println("Pokémon found in this area:")
+	for _, encounter := range pokemonArea.PokemonEncounters {
+		fmt.Println(encounter.Pokemon.Name)
+	}
+}
